@@ -1,0 +1,351 @@
+// Prisma schema for YigiCoin platform
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Rangos de usuario
+enum UserRank {
+  registrado
+  invitado
+  miembro
+  vip
+  premium
+  elite
+}
+
+// Tipos de notificación
+enum NotificationType {
+  INFO
+  WARNING
+  ALERT
+  SYSTEM
+
+  totem_used
+  suspended_for_counter
+  purchase_success
+  purchase_failed
+}
+
+// Enums para los sistemas de sorteos y loterías
+enum DrawType {
+  raffle_weekly // Sorteo semanal con puntos (100 pts)
+  raffle_monthly // Sorteo mensual con puntos (300 pts)
+  lottery_weekly // Lotería semanal normal (2 USD)
+  lottery_monthly // Lotería mensual normal (80 USD)
+  lottery_vip_weekly // Lotería VIP semanal (100 USD)
+  lottery_vip_monthly // Lotería VIP mensual (150 USD)
+}
+
+enum DrawStatus {
+  pending
+  active
+  completed
+  cancelled
+}
+
+enum TicketPaymentType {
+  points
+  metamask
+}
+
+enum TicketStatus {
+  pending
+  paid
+  winner
+  loser
+}
+
+enum PaymentStatus {
+  pending
+  completed
+  failed
+}
+
+enum SlotOwnerType {
+  USER
+  PLATFORM
+  VACANT
+}
+
+// Modelo de usuarios de la plataforma
+model User {
+  id            String  @id @default(cuid())
+  email         String  @unique
+  username      String? @unique
+  firstName     String?
+  lastName      String?
+  name          String?
+  phone         String?
+  gender        String?
+  walletAddress String? @unique
+
+  passwordHash String
+  pinHash      String?
+
+  rank    UserRank @default(registrado)
+  points  Int      @default(1000)
+  balance Int      @default(10000)
+  totems  Int      @default(0)
+
+  counterExpiresAt DateTime?
+  lastTotemUsedAt  DateTime?
+
+  isSuspended Boolean   @default(false)
+  suspendedAt DateTime?
+
+  registrationFeePaid Boolean   @default(false)
+  emailVerifiedAt     DateTime?
+
+  isOwner  Boolean @default(false)
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  notifications   Notification[]
+  adClaims        AdClaim[]
+  tickets         Ticket[]
+  news            News[]
+  passwordResets  PasswordReset[]
+  payments        Payment[]
+  rankUpgradeLogs RankUpgradeLog[]
+  slots           Slot[]           @relation("UserSlots")
+}
+
+// Modelo de anuncios (publicidad)
+model Ad {
+  id           String   @id @default(cuid())
+  title        String
+  description  String?
+  url          String
+  isActive     Boolean  @default(true)
+  rewardPoints Int      @default(2)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  claims AdClaim[]
+}
+
+// Notificaciones del sistema
+model Notification {
+  id        String           @id @default(cuid())
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  type      NotificationType
+  payload   Json?
+  createdAt DateTime         @default(now())
+
+  @@index([userId, createdAt])
+  @@index([type])
+}
+
+// Registro de anuncios reclamados (puntos)
+model AdClaim {
+  id     String   @id @default(cuid())
+  user   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String
+  ad     Ad       @relation(fields: [adId], references: [id], onDelete: Cascade)
+  adId   String
+  points Int      @default(0)
+  date   DateTime @default(now())
+
+  @@unique([userId, adId, date])
+  @@index([userId, date])
+  @@index([adId, date])
+}
+
+// Modelo para los sorteos/loterías
+model Draw {
+  id               String     @id @default(cuid())
+  type             DrawType
+  status           DrawStatus @default(active)
+  prizeAmount      Int
+  accumulatedPrize Int        @default(0)
+  drawDate         DateTime
+  completedAt      DateTime?
+  winnerId         String?
+  winnerTicketId   String?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  tickets Ticket[]
+  result  DrawResult?
+
+  @@index([type, status])
+  @@index([drawDate])
+  @@index([winnerId])
+}
+
+// Modelo para los boletos
+model Ticket {
+  id           String            @id @default(cuid())
+  drawId       String
+  userId       String
+  ticketNumber String
+  paymentType  TicketPaymentType
+  status       TicketStatus      @default(pending)
+
+  pointsCost Int?
+  usdCost    Int?
+  txHash     String?
+
+  purchasedAt DateTime @default(now())
+
+  draw Draw @relation(fields: [drawId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([drawId, ticketNumber])
+  @@index([userId])
+  @@index([drawId])
+  @@index([status])
+}
+
+// Modelo para los resultados de sorteos
+model DrawResult {
+  id             String   @id @default(cuid())
+  drawId         String   @unique
+  winnerId       String?
+  winnerTicketId String?
+  prizeAwarded   Int
+  totalTickets   Int
+  completedAt    DateTime @default(now())
+
+  draw Draw @relation(fields: [drawId], references: [id], onDelete: Cascade)
+
+  @@index([winnerId])
+  @@index([completedAt])
+}
+
+// Modelo para noticias del sistema
+model News {
+  id        String   @id @default(cuid())
+  title     String
+  content   String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  authorId  String
+
+  author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([isActive, createdAt])
+  @@index([authorId])
+}
+
+// Verificación de email (registro)
+model EmailVerification {
+  id        String   @id @default(cuid())
+  email     String
+  code      String?
+  codeHash  String
+  used      Boolean  @default(false)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([email, used])
+}
+
+// Reseteo de contraseña
+model PasswordReset {
+  id        String   @id @default(cuid())
+  email     String
+  codeHash  String
+  token     String?  @unique
+  used      Boolean  @default(false)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([email, used])
+  @@index([userId])
+}
+
+model Slot {
+  id       String  @id @default(cuid())
+  label    String? @unique
+  level    Int
+  position Int
+  parentId String?
+  parent   Slot?   @relation("SlotTree", fields: [parentId], references: [id])
+  children Slot[]  @relation("SlotTree")
+
+  ownerType   SlotOwnerType
+  ownerUserId String?
+  ownerUser   User?         @relation("UserSlots", fields: [ownerUserId], references: [id])
+
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+  transferLogs SlotTransferLog[]
+
+  @@unique([level, position])
+  @@index([parentId])
+  @@index([ownerType])
+  @@index([ownerUserId])
+}
+
+model SlotTransferLog {
+  id     String @id @default(cuid())
+  slotId String
+  slot   Slot   @relation(fields: [slotId], references: [id])
+
+  slotLabel String?
+
+  fromOwnerType   SlotOwnerType
+  fromOwnerUserId String?
+  toOwnerType     SlotOwnerType
+  toOwnerUserId   String?
+
+  reason String
+
+  createdAt DateTime @default(now())
+
+  @@index([slotId])
+  @@index([fromOwnerUserId])
+  @@index([toOwnerUserId])
+}
+
+// Pagos (simulados / reales)
+model Payment {
+  id        String        @id @default(cuid())
+  user      User?         @relation(fields: [userId], references: [id])
+  userId    String?
+  email     String
+  amount    Int
+  currency  String        @default("USD")
+  status    PaymentStatus @default(pending)
+  method    String? // 'paypal', 'metamask_demo', etc.
+  provider  String? // 'paypal', 'metamask', etc.
+  reference String?       @unique // orderId de PayPal, txHash, firma, etc.
+  purpose   String? // 'registration_fee', 'rank_upgrade', ...
+  createdAt DateTime      @default(now())
+
+  // 🔹 NUEVO: lado opuesto de la relación con RankUpgradeLog
+  rankUpgradeLogs RankUpgradeLog[]
+
+  @@index([email, status])
+  @@index([userId, status])
+}
+
+// Historial de upgrades de rango
+model RankUpgradeLog {
+  id        String   @id @default(cuid())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  fromRank  UserRank
+  toRank    UserRank
+  provider  String // 'dev', 'paypal', 'metamask_demo', etc.
+  payment   Payment? @relation(fields: [paymentId], references: [id])
+  paymentId String?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([paymentId])
+}

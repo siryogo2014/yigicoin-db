@@ -1,0 +1,95 @@
+/**
+ * POST /api/invites/dev-conversion
+ * Development endpoint for testing counter reset on invite conversion
+ * Only applies to users with rank === 'Registrado'
+ */
+
+import { NextRequest, NextResponse } from 'next/server';
+
+// Rank duration configuration
+const RANK_DURATIONS: Record<string, number> = {
+  registrado: 172800, // 48 hours
+  invitado: 259200, // 72 hours
+  miembro: 345600, // 96 hours
+  vip: 432000, // 120 hours
+  premium: 604800, // 168 hours (7 days)
+  elite: 864000, // 240 hours (10 days)
+};
+
+export async function POST(request: NextRequest) {
+  try {
+    // Parse request body
+    const body = await request.json();
+    const { inviterId } = body;
+    
+    if (!inviterId) {
+      return NextResponse.json(
+        { ok: false, error: 'inviterId is required' },
+        { status: 400 }
+      );
+    }
+    
+    // Return success with instructions for client-side processing
+    // In a real app, this would interact with a database
+    return NextResponse.json({
+      ok: true,
+      message: 'Process on client side',
+      inviterId,
+      requiresClientProcessing: true,
+    });
+  } catch (error) {
+    console.error('Error in /api/invites/dev-conversion:', error);
+    return NextResponse.json(
+      { ok: false, error: 'Internal server error' },
+      { status: 500 }
+    );
+  }
+}
+
+/**
+ * Client-side implementation helper
+ * This function should be called from the client after receiving
+ * the API response
+ */
+export function processInviteConversionOnClient(inviterId: string) {
+  try {
+    // Load user data from localStorage
+    const userData = JSON.parse(localStorage.getItem('user_simulation_data') || '{}');
+    
+    // Check if user has the 'registrado' rank
+    if (userData.currentRank !== 'registrado') {
+      return {
+        ok: false,
+        message: 'Counter reset not applicable - user is not in Registrado rank',
+        user: null,
+      };
+    }
+    
+    // Calculate new counter end time (48 hours from now)
+    const now = new Date();
+    const duration = RANK_DURATIONS.registrado;
+    const counterEndsAt = new Date(now.getTime() + duration * 1000);
+    
+    // Update user data
+    userData.counterEndsAt = counterEndsAt.toISOString();
+    userData.lastCounterReset = now.toISOString();
+    userData.counterResetReason = 'invite_conversion';
+    userData.inviterId = inviterId;
+    
+    // Save updated data
+    localStorage.setItem('user_simulation_data', JSON.stringify(userData));
+    
+    return {
+      ok: true,
+      user: userData,
+      message: `Counter reset for inviter ${inviterId} - New end time: ${counterEndsAt.toISOString()}`,
+    };
+  } catch (error) {
+    console.error('Error processing invite conversion on client:', error);
+    return {
+      ok: false,
+      error: 'Error processing invite conversion',
+      user: null,
+    };
+  }
+}
