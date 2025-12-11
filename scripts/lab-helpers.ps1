@@ -1,31 +1,75 @@
 # scripts/lab-helpers.ps1
-# Helpers LAB para M6/M7/M9
+# Helpers LAB para M6/M7/M9/M10
 # NO ejecuta tests automáticamente.
 # Cárgalo con:
 #   . .\scripts\lab-helpers.ps1
 
-$script:BaseUrl = "http://localhost:3000"
+Set-StrictMode -Version 2.0
+
+# Permite override por variable de entorno
+# Ejemplo:
+#   $env:YIGICOIN_LAB_BASE_URL="http://localhost:3001"
+#   .\scripts\test-m9.ps1
+$script:BaseUrl = if ($env:YIGICOIN_LAB_BASE_URL) {
+    $env:YIGICOIN_LAB_BASE_URL.TrimEnd("/")
+} else {
+    "http://localhost:3000"
+}
 
 function Set-LabBaseUrl {
-    param([Parameter(Mandatory=$true)][string]$Url)
+    param([Parameter(Mandatory = $true)][string]$Url)
     $script:BaseUrl = $Url.TrimEnd("/")
     Write-Host "BaseUrl set to $script:BaseUrl" -ForegroundColor Cyan
 }
 
+function Get-LabBaseUrl {
+    return $script:BaseUrl
+}
+
+function Test-LabServerUp {
+    # Ping liviano y sin mutación
+    $url = "$script:BaseUrl/api/dev/slots/tree?maxLevel=1"
+    try {
+        # En Windows PowerShell 5.1, 4xx genera excepción,
+        # pero eso aún confirma que el servidor está vivo.
+        Invoke-RestMethod -Method GET -Uri $url -TimeoutSec 5 | Out-Null
+        return $true
+    } catch {
+        $resp = $_.Exception.Response
+        if ($null -ne $resp) {
+            return $true
+        }
+        return $false
+    }
+}
+
 function Invoke-Api {
     param(
-        [Parameter(Mandatory=$true)][ValidateSet("GET","POST")][string]$Method,
-        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory = $true)][ValidateSet("GET", "POST")][string]$Method,
+        [Parameter(Mandatory = $true)][string]$Path,
         [object]$Body = $null
     )
 
+    if (-not (Test-LabServerUp)) {
+        throw "No se pudo conectar a $script:BaseUrl. Abre otra terminal y ejecuta: npm run dev -- --port 3000"
+    }
+
     $url = "$script:BaseUrl$Path"
 
-    if ($Body -ne $null) {
-        $json = $Body | ConvertTo-Json -Depth 10
-        return Invoke-RestMethod -Method $Method -Uri $url -ContentType "application/json" -Body $json
-    } else {
-        return Invoke-RestMethod -Method $Method -Uri $url
+    try {
+        if ($Body -ne $null) {
+            $json = $Body | ConvertTo-Json -Depth 10
+            return Invoke-RestMethod -Method $Method -Uri $url -ContentType "application/json" -Body $json
+        } else {
+            return Invoke-RestMethod -Method $Method -Uri $url
+        }
+    } catch {
+        # Si hay respuesta HTTP, el server está arriba; el error es de endpoint/guard/datos
+        $resp = $_.Exception.Response
+        if ($null -eq $resp) {
+            throw "No se pudo conectar a $script:BaseUrl. Verifica que Next esté corriendo en ese puerto."
+        }
+        throw
     }
 }
 
@@ -44,18 +88,31 @@ function Reset-Lab {
         $r2 = Invoke-Api -Method POST -Path "/api/dev/slots/reset-logs"
         Write-Host "reset-logs ok: $($r2.ok) deleted: $($r2.deleted)"
     } catch {
-        Write-Host "reset-logs FAIL. Si aún no lo creaste, ignóralo." -ForegroundColor Yellow
+        Write-Host "reset-logs FAIL (no fatal). Si aún no lo creaste, ignóralo." -ForegroundColor Yellow
         # no fatal
     }
 
     $r3 = Invoke-Api -Method POST -Path "/api/dev/init-slots"
-    Write-Host "init-slots ok: $($r3.ok) created/already: $($r3.created)$($r3.alreadyInitialized)"
+
+    $created = if ($r3.PSObject.Properties.Name -contains "created") { $r3.created } else { $null }
+    $already = if ($r3.PSObject.Properties.Name -contains "alreadyInitialized") { $r3.alreadyInitialized } else { $null }
+    $count = if ($r3.PSObject.Properties.Name -contains "count") { $r3.count } else { $null }
+
+    if ($created) {
+        Write-Host "init-slots ok: $($r3.ok) created: $created"
+    } elseif ($already -ne $null) {
+        Write-Host "init-slots ok: $($r3.ok) alreadyInitialized: $already count: $count"
+    } else {
+        Write-Host "init-slots ok: $($r3.ok)"
+    }
+
+    return $r3
 }
 
 function Assign-Slot {
     param(
-        [Parameter(Mandatory=$true)][string]$Email,
-        [Parameter(Mandatory=$true)][string]$Label
+        [Parameter(Mandatory = $true)][string]$Email,
+        [Parameter(Mandatory = $true)][string]$Label
     )
 
     $body = @{ email = $Email; slotLabel = $Label }
@@ -72,7 +129,7 @@ function Assign-Slot {
 }
 
 function Expropriate {
-    param([Parameter(Mandatory=$true)][string]$Email)
+    param([Parameter(Mandatory = $true)][string]$Email)
 
     $res = Invoke-Api -Method POST -Path "/api/dev/slots/expropriate?email=$Email"
     Write-Host "expropriate $Email OK -> $($res.caseResult.case)"
@@ -93,7 +150,7 @@ function Show-Tree {
 }
 
 function Preview-Sponsors {
-    param([Parameter(Mandatory=$true)][string]$Email)
+    param([Parameter(Mandatory = $true)][string]$Email)
 
     $res = Invoke-Api -Method GET -Path "/api/dev/sponsors/preview?email=$Email"
     Write-Host "preview sponsors for $Email ok: $($res.ok)"

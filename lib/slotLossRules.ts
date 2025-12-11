@@ -1,11 +1,19 @@
 // lib/slotLossRules.ts
 import type { Slot } from '@prisma/client';
 
+/**
+ * Casos oficiales y definitivos del sistema de pérdida/retención de slots.
+ *
+ * NOTA IMPORTANTE:
+ * - No existe un CASE 3 independiente: es un efecto del CASE 2.
+ * - Cualquier estado fuera de estos casos debe considerarse NO SOPORTADO
+ *   para proteger la integridad del árbol.
+ */
 export type LossCase =
     | 'CASE_1_PLATFORM_REPLACES_PARENT_WITH_2_CHILDREN'
     | 'CASE_2_SINGLE_CHILD_PROMOTES'
     | 'CASE_4_NO_CHILDREN_VACANT'
-    | 'UNKNOWN';
+    | 'UNSUPPORTED_STATE';
 
 export type LossCaseResult = {
     case: LossCase;
@@ -20,18 +28,20 @@ function isUserOwned(slot: Slot | null): boolean {
 }
 
 /**
- * Clasificador oficial M9 v2.
+ * Clasificador oficial (M9 final).
  *
  * Importante:
- * NO asumimos que `position` sea 0/1 por padre.
- * Tomamos los hijos directos ordenados por `position`
- * y consideramos como left/right los dos primeros.
+ * - NO asumimos que `position` sea 0/1 por padre.
+ * - Tomamos los hijos directos ordenados por `position`
+ *   y consideramos como left/right los dos primeros.
  *
- * Caso 1: padre con 2 hijos USER -> PLATFORM ocupa el slot del padre.
- * Caso 2: padre con 1 hijo USER -> ese hijo sube.
- * Caso 4: padre sin hijos USER -> slot VACANT + acciones hacia el padre superior.
+ * Casos válidos:
+ * - Caso 1: padre con 2 hijos USER -> PLATFORM ocupa el slot del padre.
+ * - Caso 2/3: padre con 1 hijo USER -> ese hijo sube y su slot original queda VACANT.
+ * - Caso 4: padre sin hijos USER -> slot VACANT + acciones hacia el padre superior.
  *
- * Caso 3 es efecto del Caso 2 (no se clasifica como caso independiente).
+ * Cualquier otra situación (incluyendo corrupción del árbol con >2 hijos)
+ * se marca como UNSUPPORTED_STATE para que la capa de expropiación falle de forma controlada.
  */
 export function classifyLossCase(input: {
     parentSlot: Slot;
@@ -43,6 +53,17 @@ export function classifyLossCase(input: {
 
     const leftChild = ordered[0] ?? null;
     const rightChild = ordered[1] ?? null;
+
+    // Defensa contra corrupción de árbol (más de 2 hijos directos)
+    if (ordered.length > 2) {
+        return {
+            case: 'UNSUPPORTED_STATE',
+            parentSlot,
+            leftChild,
+            rightChild,
+            promotingChild: null,
+        };
+    }
 
     const leftIsUser = isUserOwned(leftChild);
     const rightIsUser = isUserOwned(rightChild);
@@ -58,7 +79,7 @@ export function classifyLossCase(input: {
         };
     }
 
-    // Caso 2
+    // Caso 2/3
     if (leftIsUser !== rightIsUser) {
         const promotingChild = leftIsUser ? leftChild : rightChild;
 
@@ -83,7 +104,7 @@ export function classifyLossCase(input: {
     }
 
     return {
-        case: 'UNKNOWN',
+        case: 'UNSUPPORTED_STATE',
         parentSlot,
         leftChild,
         rightChild,

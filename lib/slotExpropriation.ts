@@ -30,7 +30,7 @@ export type ExpropriationResult =
     };
 
 function buildAuditEntry(
-    slot: Pick<Slot, 'id' | 'label' | 'ownerType' | 'ownerUserId'>,
+    slot: Slot,
     toOwnerType: SlotOwnerType,
     toOwnerUserId: string | null,
     reason: string,
@@ -50,7 +50,7 @@ async function recordTransfer(
     tx: Prisma.TransactionClient,
     audit: AuditEntry[],
     entry: AuditEntry,
-) {
+): Promise<void> {
     audit.push(entry);
 
     await tx.slotTransferLog.create({
@@ -84,6 +84,7 @@ export async function expropriateUserByEmail(
         };
     }
 
+    // Busca el slot que el usuario posee actualmente (ownerType = USER)
     const parentSlot = await prisma.slot.findFirst({
         where: {
             ownerType: 'USER',
@@ -92,19 +93,6 @@ export async function expropriateUserByEmail(
     });
 
     if (!parentSlot) {
-        const anyOwnedSlot = await prisma.slot.findFirst({
-            where: { ownerUserId: user.id },
-        });
-
-        if (anyOwnedSlot) {
-            return {
-                ok: false,
-                code: 'ALREADY_PROCESSED',
-                message:
-                    'El usuario ya no posee un slot USER; probablemente ya fue procesado por expropiación.',
-            };
-        }
-
         return {
             ok: false,
             code: 'SLOT_NOT_FOUND',
@@ -112,18 +100,19 @@ export async function expropriateUserByEmail(
         };
     }
 
-    return await prisma.$transaction(async (tx) => {
+    return prisma.$transaction(async (tx) => {
         const audit: AuditEntry[] = [];
 
+        // Refresca el slot dentro de la transacción
         const freshParent = await tx.slot.findUnique({
             where: { id: parentSlot.id },
         });
 
         if (!freshParent) {
             return {
-                ok: false,
+                ok: false as const,
                 code: 'SLOT_NOT_FOUND',
-                message: 'Slot padre no encontrado.',
+                message: 'El usuario no tiene slot asignado.',
             };
         }
 
@@ -132,7 +121,7 @@ export async function expropriateUserByEmail(
             orderBy: { position: 'asc' },
         });
 
-        const freshCase = classifyLossCase({
+        const caseResult = classifyLossCase({
             parentSlot: freshParent,
             children: freshChildren,
         });
@@ -141,8 +130,11 @@ export async function expropriateUserByEmail(
             ? await tx.slot.findUnique({ where: { id: freshParent.parentId } })
             : null;
 
-        // CASE 1: padre con 2 hijos USER -> PLATFORM ocupa el slot del padre
-        if (freshCase.case === 'CASE_1_PLATFORM_REPLACES_PARENT_WITH_2_CHILDREN') {
+        // =========================
+        // CASE 1
+        // Padre con 2 hijos USER -> PLATFORM reemplaza el slot del padre
+        // =========================
+        if (caseResult.case === 'CASE_1_PLATFORM_REPLACES_PARENT_WITH_2_CHILDREN') {
             await recordTransfer(
                 tx,
                 audit,
@@ -156,17 +148,29 @@ export async function expropriateUserByEmail(
 
             await tx.slot.update({
                 where: { id: freshParent.id },
-                data: { ownerType: 'PLATFORM', ownerUserId: null },
+                data: {
+                    ownerType: 'PLATFORM',
+                    ownerUserId: null,
+                },
             });
 
-            return { ok: true, caseResult: freshCase, audit };
+            return {
+                ok: true as const,
+                caseResult,
+                audit,
+            };
         }
 
-        // CASE 2 + 3: padre con 1 hijo USER -> hijo asciende y su slot original queda VACANT
-        if (freshCase.case === 'CASE_2_SINGLE_CHILD_PROMOTES' && freshCase.promotingChild) {
-            const child = freshCase.promotingChild;
+        // =========================
+        // CASE 2/3
+        // Padre con 1 hijo USER -> el hijo asciende y su slot queda VACANT
+        // =========================
+        if (
+            caseResult.case === 'CASE_2_SINGLE_CHILD_PROMOTES' &&
+            caseResult.promotingChild
+        ) {
+            const child = caseResult.promotingChild;
 
-            // 2.1 hijo ocupa slot del padre
             await recordTransfer(
                 tx,
                 audit,
@@ -174,7 +178,7 @@ export async function expropriateUserByEmail(
                     freshParent,
                     'USER',
                     child.ownerUserId ?? null,
-                    'CASE_2: hijo único asciende al slot del padre',
+                    'CASE_2/3: hijo único asciende al slot del padre',
                 ),
             );
 
@@ -182,11 +186,10 @@ export async function expropriateUserByEmail(
                 where: { id: freshParent.id },
                 data: {
                     ownerType: 'USER',
-                    ownerUserId: child.ownerUserId,
+                    ownerUserId: child.ownerUserId ?? null,
                 },
             });
 
-            // 2.2 slot original del hijo queda VACANT
             await recordTransfer(
                 tx,
                 audit,
@@ -194,20 +197,30 @@ export async function expropriateUserByEmail(
                     child,
                     'VACANT',
                     null,
-                    'CASE_3: slot original del hijo queda VACANT tras ascenso',
+                    'CASE_2/3: slot original del hijo queda VACANT tras ascenso',
                 ),
             );
 
             await tx.slot.update({
                 where: { id: child.id },
-                data: { ownerType: 'VACANT', ownerUserId: null },
+                data: {
+                    ownerType: 'VACANT',
+                    ownerUserId: null,
+                },
             });
 
-            return { ok: true, caseResult: freshCase, audit };
+            return {
+                ok: true as const,
+                caseResult,
+                audit,
+            };
         }
 
-        // CASE 4: padre sin hijos USER -> slot VACANT + notificar + +48h
-        if (freshCase.case === 'CASE_4_NO_CHILDREN_VACANT') {
+        // =========================
+        // CASE 4
+        // Padre sin hijos USER -> slot VACANT + abuelo recibe +48h y derecho a re-invitar
+        // =========================
+        if (caseResult.case === 'CASE_4_NO_CHILDREN_VACANT') {
             await recordTransfer(
                 tx,
                 audit,
@@ -221,26 +234,60 @@ export async function expropriateUserByEmail(
 
             await tx.slot.update({
                 where: { id: freshParent.id },
-                data: { ownerType: 'VACANT', ownerUserId: null },
+                data: {
+                    ownerType: 'VACANT',
+                    ownerUserId: null,
+                },
             });
 
-            const notifyUserId =
-                freshGrandParent?.ownerType === 'USER'
-                    ? freshGrandParent.ownerUserId
-                    : null;
+            let notifyUserId: string | null = null;
+            let addHours: number | undefined = undefined;
+
+            if (
+                freshGrandParent &&
+                freshGrandParent.ownerType === 'USER' &&
+                freshGrandParent.ownerUserId
+            ) {
+                notifyUserId = freshGrandParent.ownerUserId;
+                addHours = 48;
+
+                const userToNotify = await tx.user.findUnique({
+                    where: { id: notifyUserId },
+                    select: { counterExpiresAt: true },
+                });
+
+                const now = new Date();
+                const base =
+                    userToNotify?.counterExpiresAt &&
+                        userToNotify.counterExpiresAt > now
+                        ? userToNotify.counterExpiresAt
+                        : now;
+
+                const newExpires = new Date(
+                    base.getTime() + addHours * 60 * 60 * 1000,
+                );
+
+                await tx.user.update({
+                    where: { id: notifyUserId },
+                    data: {
+                        counterExpiresAt: newExpires,
+                    },
+                });
+            }
 
             return {
-                ok: true,
-                caseResult: freshCase,
+                ok: true as const,
+                caseResult,
                 audit,
                 notifyUserId,
                 reinviteUserId: notifyUserId,
-                addHours: notifyUserId ? 48 : undefined,
+                addHours,
             };
         }
 
+        // Cualquier estado que no sea 1, 2/3 o 4
         return {
-            ok: false,
+            ok: false as const,
             code: 'UNSUPPORTED_CASE',
             message: 'El caso no pudo resolverse con las reglas actuales.',
         };
