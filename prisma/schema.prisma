@@ -73,6 +73,13 @@ enum SlotOwnerType {
   VACANT
 }
 
+enum InviteStatus {
+  ACTIVE
+  CONSUMED
+  EXPIRED
+}
+
+
 // Modelo de usuarios de la plataforma
 model User {
   id            String  @id @default(cuid())
@@ -116,6 +123,9 @@ model User {
   payments        Payment[]
   rankUpgradeLogs RankUpgradeLog[]
   slots           Slot[]           @relation("UserSlots")
+  inviteLinks       InviteLink[]      @relation("UserInviteLinks")
+  consumedInvites   InviteLink[]      @relation("UserConsumedInvites")
+
 }
 
 // Modelo de anuncios (publicidad)
@@ -349,3 +359,24 @@ model RankUpgradeLog {
   @@index([userId, createdAt])
   @@index([paymentId])
 }
+
+// Sistema de invitaciones por enlaces únicos
+model InviteLink {
+  id               String        @id @default(cuid())
+  code             String        @unique
+
+  ownerUserId      String
+  ownerUser        User          @relation("UserInviteLinks", fields: [ownerUserId], references: [id], onDelete: Cascade)
+
+  consumedByUserId String?
+  consumedByUser   User?         @relation("UserConsumedInvites", fields: [consumedByUserId], references: [id])
+
+  status           InviteStatus  @default(ACTIVE)
+  expiresAt        DateTime?
+  consumedAt       DateTime?
+  createdAt        DateTime      @default(now())
+
+  @@index([ownerUserId])
+  @@index([status, expiresAt])
+}
+
